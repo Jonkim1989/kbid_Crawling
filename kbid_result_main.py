@@ -10,7 +10,7 @@ import os
 import gspread
 import traceback
 from datetime import datetime, timedelta
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -197,18 +197,36 @@ class KbidBrowser:
         # 검색어 정제
         clean_term = re.sub(r'^(?:결|전|수|취|긴|견|재)\s*', '', clean_num).strip()
         url = KbidConfig.SEARCH_URL_TEMPLATE.format(quote_plus(clean_term))
-        print(f"   [디버그] 검색 시도: {clean_term}")
-        self.driver.get(url)
         
-        try:
-            # 검색 결과 섹션이 나타날 때까지 대기 (최대 10초)
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//*[contains(@class, 'search_result_wrap') or contains(@class, 'area_result')]"))
-            )
-            time.sleep(1) # 추가 안정성 대기
-        except:
-            print("   ⚠️ 검색 결과 로딩 지연 중 (계속 진행)")
-            time.sleep(3)
+        # [최적화] 메인페이지 정체 방지 및 중복 로드 방지
+        for attempt in range(2):
+            try:
+                current_url = unquote(self.driver.current_url)
+                # 이미 해당 검색 결과 페이지에 있는지 확인
+                if clean_term in current_url and "search/index.htm" in current_url:
+                    print("   [디버그] 이미 해당 검색 결과 페이지에 있습니다.")
+                    break
+                
+                print(f"   [디버그] 검색 페이지 이동 시도 ({attempt+1}/2): {clean_term}")
+                self.driver.set_page_load_timeout(20)
+                self.driver.get(url)
+                time.sleep(1.5)
+                
+                # 검색 결과 페이지의 핵심 요소가 나타났는지 확인
+                # (메인페이지에 머물고 있으면 이 조건이 실패함)
+                WebDriverWait(self.driver, 7).until(
+                    EC.presence_of_element_located((By.XPATH, "//*[contains(@class, 'search_result_wrap') or contains(@class, 'area_result') or @id='idCBidTable' or contains(@id, 'listBody')]"))
+                )
+                break
+            except Exception as e:
+                if attempt == 0:
+                    print(f"   ⚠️ 검색 페이지 진입 지연 또는 실패 ({e}) - 재시도합니다.")
+                    try: self.driver.execute_script("window.stop();")
+                    except: pass
+                    time.sleep(1)
+                    continue
+                else:
+                    print("   ⚠️ 검색 결과 로딩 지연 중 (계속 진행)")
         
         try:
             # 디버깅용: 항상 현재 검색 결과 저장 (사용자 요청)
