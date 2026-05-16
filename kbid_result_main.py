@@ -224,6 +224,8 @@ class KbidBrowser:
             
             # 검색어에서 불필요한 공백 제거
             match_term = clean_num.replace(" ", "")
+            # 국방부 공고 여부 확인
+            is_mnd = "국방부" in str(task.get("num", ""))
             
             for title_elem in titles:
                 try:
@@ -231,14 +233,22 @@ class KbidBrowser:
                     if "입찰" in title_text and "결과" not in title_text:
                         continue # 입찰공고 타이틀은 스킵
                         
-                    print(f"   [디버그] 타이틀 '{title_text}' 하위 탐색 시작")
+                    print(f"   [디버그] 타이틀 '{title_text}' 하위 탐색 시작 (국방부 여부: {is_mnd})")
                     
                     # 타이틀 이후의 모든 tr 탐색 (다음 섹션 타이틀 전까지만)
                     # 1. 타이틀 이후의 모든 tr을 가져옴
-                    rows = title_elem.find_elements(By.XPATH, "./following::tr[position() <= 50]")
+                    rows = title_elem.find_elements(By.XPATH, "./following::tr[position() <= 20]")
                     
-                    for row in rows:
+                    for idx, row in enumerate(rows):
                         try:
+                            # [수정] 국방부 공고는 번호 체계가 다르므로 결과 섹션의 첫 번째 행을 우선 선택
+                            if is_mnd and idx == 0:
+                                links = row.find_elements(By.TAG_NAME, "a")
+                                if links:
+                                    target_link = links[0]
+                                    print(f"   ✅ [국방부] 첫 번째 결과 항목 자동 매칭")
+                                    break
+
                             # 행의 전체 텍스트 (공백 제거)
                             row_text = (row.get_attribute("innerText") or row.text).replace(" ", "").replace("\n", "")
                             
@@ -252,9 +262,6 @@ class KbidBrowser:
                                         target_link = link
                                         print(f"   ✅ '{title_text}' 영역에서 '{match_term}' 매칭 성공")
                                         break
-                            
-                            # 만약 다른 '타이틀' 급 요소를 만나면 중단 (섹션 끝으로 간주)
-                            # 하지만 여기서는 단순하게 일정 개수만 보거나 매칭되면 끝냄
                         except: continue
                         if target_link: break
                     if target_link: break

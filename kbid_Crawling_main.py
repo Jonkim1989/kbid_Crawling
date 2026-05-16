@@ -662,16 +662,24 @@ class KbidBrowser:
 
             # 매칭 시도
             print(f"📌 매칭 시도...")
+            # 국방부 공고 여부 확인
+            is_mnd = "국방부" in str(num)
             target_row = None
             cancel_row = None
-
-            for row in bid_rows:
+            
+            for idx, row in enumerate(bid_rows):
                 try:
                     row_text = row.text.replace("\n", " ").strip()
                     row_html = row.get_attribute("innerHTML")
                 except:
                     continue
                 
+                # [수정] 국방부 공고는 첫 번째 행을 우선 선택 (번호 불일치 대응)
+                if is_mnd and idx == 0:
+                    print(f"      [국방부] 첫 번째 항목 자동 매칭: {row_text[:60]}...")
+                    target_row = row
+                    break
+
                 # 공고번호 또는 공고명 매칭 (공백/특수문자 제거 후 비교)
                 short_name = name[:10]
                 name_only_ko = re.sub(r'[^가-힣0-9]', '', name)
