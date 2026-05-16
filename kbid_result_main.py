@@ -198,35 +198,64 @@ class KbidBrowser:
         clean_term = re.sub(r'^(?:결|전|수|취|긴|견|재)\s*', '', clean_num).strip()
         url = KbidConfig.SEARCH_URL_TEMPLATE.format(quote_plus(clean_term))
         
-        # [최적화] 메인페이지 정체 방지 및 중복 로드 방지
-        for attempt in range(2):
+        # [최적화] 메인페이지 정체 방지 및 중복 로드 방지 (강력한 탈출 로직 추가)
+        for attempt in range(3): # 시도 횟수 3회로 증가
             try:
-                current_url = unquote(self.driver.current_url)
+                # 0. 윈도우 상태 관리 (불필요한 팝업창 닫기 및 메인창 집중)
+                if len(self.driver.window_handles) > 1:
+                    main_handle = self.driver.window_handles[0]
+                    for handle in self.driver.window_handles[1:]:
+                        self.driver.switch_to.window(handle)
+                        self.driver.close()
+                    self.driver.switch_to.window(main_handle)
+
+                # 1. 현재 상태 확인
+                try:
+                    current_url = unquote(self.driver.current_url)
+                except:
+                    print("   ⚠️ 브라우저 응답 없음 - 잠시 대기...")
+                    time.sleep(2)
+                    continue
+
                 # 이미 해당 검색 결과 페이지에 있는지 확인
                 if clean_term in current_url and "search/index.htm" in current_url:
                     print("   [디버그] 이미 해당 검색 결과 페이지에 있습니다.")
                     break
                 
-                print(f"   [디버그] 검색 페이지 이동 시도 ({attempt+1}/2): {clean_term}")
-                self.driver.set_page_load_timeout(20)
-                self.driver.get(url)
-                time.sleep(1.5)
+                print(f"   [디버그] 검색 페이지 이동 시도 ({attempt+1}/3): {clean_term}")
                 
-                # 검색 결과 페이지의 핵심 요소가 나타났는지 확인
-                # (메인페이지에 머물고 있으면 이 조건이 실패함)
-                WebDriverWait(self.driver, 7).until(
+                # 2. 이동 방식 결정: 메인 페이지라면 직접 입력을 시도해봄 (get 방식이 막히는 경우 대비)
+                if "index_first" in current_url or current_url.endswith(".co.kr/"):
+                    search_input = self.driver.find_elements(By.ID, "s_search_word")
+                    if search_input and search_input[0].is_displayed():
+                        print("   [디버그] 메인페이지 검색창 직접 입력 시도")
+                        search_input[0].clear()
+                        search_input[0].send_keys(clean_term)
+                        search_input[0].send_keys("\n")
+                    else:
+                        self.driver.get(url)
+                else:
+                    self.driver.set_page_load_timeout(20)
+                    self.driver.get(url)
+                
+                time.sleep(2.0)
+                
+                # 3. 검색 결과 페이지의 핵심 요소가 나타났는지 확인
+                WebDriverWait(self.driver, 10).until(
                     EC.presence_of_element_located((By.XPATH, "//*[contains(@class, 'search_result_wrap') or contains(@class, 'area_result') or @id='idCBidTable' or contains(@id, 'listBody')]"))
                 )
+                print("   ✅ 검색 결과 페이지 진입 성공")
                 break
             except Exception as e:
-                if attempt == 0:
-                    print(f"   ⚠️ 검색 페이지 진입 지연 또는 실패 ({e}) - 재시도합니다.")
-                    try: self.driver.execute_script("window.stop();")
-                    except: pass
-                    time.sleep(1)
-                    continue
-                else:
-                    print("   ⚠️ 검색 결과 로딩 지연 중 (계속 진행)")
+                print(f"   ⚠️ 검색 페이지 진입 지연 ({attempt+1}/3): {str(e)[:100]}")
+                try:
+                    self.driver.execute_script("window.stop();")
+                    # 알림창이 있을 수 있으므로 확인
+                    self.driver.switch_to.alert.accept()
+                except: pass
+                time.sleep(2)
+                if attempt == 2:
+                    print("   ⚠️ 최종 페이지 로드 지연 (무시하고 진행)")
         
         try:
             # 디버깅용: 항상 현재 검색 결과 저장 (사용자 요청)
