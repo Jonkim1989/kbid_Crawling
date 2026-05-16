@@ -663,7 +663,7 @@ class KbidBrowser:
             # 매칭 시도
             print(f"📌 매칭 시도...")
             # 국방부 공고 여부 확인
-            is_mnd = "국방부" in str(num)
+            is_mnd = "국방부" in str(raw_num)
             target_row = None
             cancel_row = None
             
