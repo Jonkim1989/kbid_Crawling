@@ -269,46 +269,55 @@ class KbidBrowser:
             target_link = None
             print(f"   [디버그] 결과공고 관련 타이틀 {len(titles)}개 발견")
             
-            # 검색어에서 불필요한 공백 제거
+            # 매칭용 텍스트 정제
             match_term = clean_num.replace(" ", "")
-            # 국방부 공고 여부 확인
+            name_term = re.sub(r'[^가-힣0-9]', '', str(task.get("name", "")))[:10] # 한글/숫자만 10자
             is_mnd = "국방부" in str(task.get("num", ""))
             
             for title_elem in titles:
                 try:
                     title_text = title_elem.text.strip()
                     if "입찰" in title_text and "결과" not in title_text:
-                        continue # 입찰공고 타이틀은 스킵
+                        continue
                         
-                    print(f"   [디버그] 타이틀 '{title_text}' 하위 탐색 시작 (국방부 여부: {is_mnd})")
+                    print(f"   [디버그] '{title_text}' 섹션 매칭 시도 (국방부:{is_mnd})")
                     
-                    # 타이틀 이후의 모든 tr 탐색 (다음 섹션 타이틀 전까지만)
-                    # 1. 타이틀 이후의 모든 tr을 가져옴
-                    rows = title_elem.find_elements(By.XPATH, "./following::tr[position() <= 20]")
+                    # 해당 섹션 내의 모든 행(tr) 탐색 (상위 컨테이너로 올라가서 하위 tr들을 찾음)
+                    parent_container = title_elem.find_element(By.XPATH, "./ancestor::div[1]/following-sibling::div[1]")
+                    rows = parent_container.find_elements(By.TAG_NAME, "tr")
                     
+                    if not rows: # 다른 구조일 경우 대비
+                         rows = title_elem.find_elements(By.XPATH, "./following::tr[position() <= 15]")
+
                     for idx, row in enumerate(rows):
                         try:
-                            # [수정] 국방부 공고는 번호 체계가 다르므로 결과 섹션의 첫 번째 행을 우선 선택
+                            # 행 텍스트 및 HTML 가져오기
+                            row_text = (row.get_attribute("innerText") or row.text).replace(" ", "").replace("\n", "")
+                            row_text_ko = re.sub(r'[^가-힣0-9]', '', row_text)
+                            
+                            # [국방부 특수 처리] 첫 번째 결과 우선권
                             if is_mnd and idx == 0:
                                 links = row.find_elements(By.TAG_NAME, "a")
                                 if links:
                                     target_link = links[0]
-                                    print(f"   ✅ [국방부] 첫 번째 결과 항목 자동 매칭")
+                                    print(f"   ✅ [국방부] 첫 번째 결과 자동 매칭 성공")
                                     break
 
-                            # 행의 전체 텍스트 (공백 제거)
-                            row_text = (row.get_attribute("innerText") or row.text).replace(" ", "").replace("\n", "")
-                            
-                            # 공고번호가 포함되어 있는지 확인
+                            # 1. 공고번호 매칭
                             if match_term in row_text:
-                                # 해당 행 내의 모든 링크 확인
                                 links = row.find_elements(By.TAG_NAME, "a")
-                                for link in links:
-                                    link_text = link.text.strip()
-                                    if link_text: # 텍스트가 있는 링크가 보통 공고 상세 링크
-                                        target_link = link
-                                        print(f"   ✅ '{title_text}' 영역에서 '{match_term}' 매칭 성공")
-                                        break
+                                if links:
+                                    target_link = links[0]
+                                    print(f"   ✅ 번호 매칭 성공: {match_term}")
+                                    break
+                            
+                            # 2. 공고명 매칭 (번호 실패 시)
+                            if name_term and name_term in row_text_ko:
+                                links = row.find_elements(By.TAG_NAME, "a")
+                                if links:
+                                    target_link = links[0]
+                                    print(f"   ✅ 공고명 유사 매칭 성공: {name_term}")
+                                    break
                         except: continue
                         if target_link: break
                     if target_link: break
