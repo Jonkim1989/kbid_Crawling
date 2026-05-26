@@ -21,6 +21,8 @@ from selenium.common.exceptions import UnexpectedAlertPresentException, TimeoutE
 class KbidConfig:
     """설정값 및 셀렉터 관리"""
     LOGIN_URL = "https://www.kbid.co.kr/login/common_login.htm"
+    MAIN_URL = "https://www.kbid.co.kr/"
+    SEARCH_URL = "https://www.kbid.co.kr/search/index.htm"
     # 결과 공고 검색을 위해 조금 다른 파라미터를 사용할 수도 있지만 기본 검색도 결과 섹션을 포함함
     SEARCH_URL_TEMPLATE = "https://www.kbid.co.kr/search/index.htm?mid=lge123&txtFindWordTop={}"
     
@@ -33,7 +35,7 @@ class KbidConfig:
         "result_section": "//div[contains(@class, 'search_result_wrap')]//div[contains(., '최근 결과공고')]",
         "result_links": "//div[contains(@class, 'search_result_wrap')]//div[contains(., '최근 결과공고')]/following-sibling::div//table//a",
         "result_tab": "//ul[contains(@class, 'tab_bid_detail')]//li[contains(., '개찰결과')]",
-        "ranking_table": ["#idCBidTable", ".tbl_ranking", ".tbl_search_list", "//table[contains(., '순위')]"],
+        "ranking_table": ["#idCBidTable", ".tbl_ranking", ".tbl_search_list", "//table[.//th[text()='순위']]"],
         "pagination": "//div[contains(@class, 'paging')]//a"
     }
 
@@ -54,7 +56,7 @@ class GoogleSheetsManager:
         
         # 기본 필드 (결과와 무관한 앞부분)
         base_fields = [
-            "투찰상태", "공고번호", "공고명", "지역제한", "입찰개시일", "투찰마감일시", "개찰일시",
+            "투찰상태", "공고번호", "공고기관", "공고명", "지역제한", "입찰개시일", "투찰마감일시", "개찰일시",
             "기초금액", "예가변동폭", "투찰하한율", "계약방법",
             "예상투찰가1", "예상투찰가2", "예상투찰가3"
         ]
@@ -143,6 +145,7 @@ class KbidBrowser:
 
     def _init_driver(self):
         options = Options()
+        options.page_load_strategy = 'eager'  # DOM 준비되면 즉시 진행 (외부 트래커 무한대기 방지)
         options.add_argument("--incognito")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_argument('--disable-blink-features=AutomationControlled')
@@ -150,6 +153,7 @@ class KbidBrowser:
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         })
+        driver.set_page_load_timeout(30)  # eager 모드에서는 DOM 준비 후 타임아웃
         driver.implicitly_wait(3)
         return driver
 
@@ -167,6 +171,22 @@ class KbidBrowser:
                 
                 if is_logged_in:
                     print("✅ 로그인 성공")
+                    
+                    # [개선] 로그인 후 공고 검색 페이지로 이동을 2회 반복
+                    # (메인페이지 진입 지연 문제 해결)
+                    for attempt in range(2):
+                        time.sleep(3)
+                        print(f"   [공고 검색 페이지 이동] {attempt+1}/2 시도...")
+                        try:
+                            self.driver.get(KbidConfig.SEARCH_URL)
+                            time.sleep(10)
+                        except Exception as e:
+                            print(f"   ⚠️ 이동 중 오류: {str(e)[:100]}")
+                            try:
+                                self.driver.execute_script("window.stop();")
+                            except:
+                                pass
+                    
                     return True
                 time.sleep(2)
             except UnexpectedAlertPresentException as e:
@@ -224,7 +244,7 @@ class KbidBrowser:
                 
                 print(f"   [디버그] 검색 페이지 이동 시도 ({attempt+1}/3): {clean_term}")
                 
-                # 2. 이동 방식 결정: 메인 페이지라면 직접 입력을 시도해봄 (get 방식이 막히는 경우 대비)
+                # 2. 페이지 이동 (eager 모드: DOM 미로딩 자원 있어도 진행)
                 if "index_first" in current_url or current_url.endswith(".co.kr/"):
                     search_input = self.driver.find_elements(By.ID, "s_search_word")
                     if search_input and search_input[0].is_displayed():
@@ -235,15 +255,18 @@ class KbidBrowser:
                     else:
                         self.driver.get(url)
                 else:
-                    self.driver.set_page_load_timeout(20)
-                    self.driver.get(url)
+                    try:
+                        self.driver.get(url)
+                    except Exception:
+                        # eager 모드에서는 실제 발생하지 않지만, 혁시 나오면 데이터는 이미 있음
+                        try: self.driver.execute_script("window.stop();")
+                        except: pass
                 
-                time.sleep(2.0)
-                
-                # 3. 검색 결과 페이지의 핵심 요소가 나타났는지 확인
+                # 3. ViewBid 링크가 있는 행이 나타날 때까지 최대 10초 대기
                 WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, "//*[contains(@class, 'search_result_wrap') or contains(@class, 'area_result') or @id='idCBidTable' or contains(@id, 'listBody')]"))
+                    EC.presence_of_element_located((By.XPATH, "//tr[.//a[contains(@href,'ViewBid')]]"))
                 )
+                time.sleep(2.0)  # AJAX 추가 로딩 여유 시간
                 print("   ✅ 검색 결과 페이지 진입 성공")
                 break
             except Exception as e:
@@ -272,7 +295,9 @@ class KbidBrowser:
             # 매칭용 텍스트 정제
             match_term = clean_num.replace(" ", "")
             name_term = re.sub(r'[^가-힣0-9]', '', str(task.get("name", "")))[:10] # 한글/숫자만 10자
-            is_mnd = "국방부" in str(task.get("num", ""))
+            # 국방부 공고 감지: '국방부' 텍스트 OR 국방부 특유 번호 패턴(LNG/UN/MND 등)
+            _num_str = str(task.get("num", ""))
+            is_mnd = ("국방부" in _num_str) or bool(re.match(r'^(LNG|UN|MND|UE|UF|UG|UH|UI|UJ)', _num_str, re.IGNORECASE))
             
             for title_elem in titles:
                 try:
@@ -282,62 +307,82 @@ class KbidBrowser:
                         
                     print(f"   [디버그] '{title_text}' 섹션 매칭 시도 (국방부:{is_mnd})")
                     
-                    # 해당 섹션 내의 모든 행(tr) 탐색 (상위 컨테이너로 올라가서 하위 tr들을 찾음)
-                    parent_container = title_elem.find_element(By.XPATH, "./ancestor::div[1]/following-sibling::div[1]")
-                    rows = parent_container.find_elements(By.TAG_NAME, "tr")
+                    # 결과공고 섹션의 모든 행(tr) 수집
+                    # ancestor::div[1] 에서 sibling div를 5개까지 탐색 (구매/공사/용역/매각 탭 대응)
+                    rows = []
+                    try:
+                        parent_containers = title_elem.find_elements(
+                            By.XPATH, "./ancestor::div[1]/following-sibling::div[position() <= 5]"
+                        )
+                        for container in parent_containers:
+                            rows.extend(container.find_elements(By.TAG_NAME, "tr"))
+                    except:
+                        pass
                     
-                    if not rows: # 다른 구조일 경우 대비
-                         rows = title_elem.find_elements(By.XPATH, "./following::tr[position() <= 15]")
+                    if not rows:
+                        try:
+                            rows = title_elem.find_elements(By.XPATH, "./following::tr[position() <= 20]")
+                        except:
+                            pass
 
                     for idx, row in enumerate(rows):
                         try:
-                            # 행 텍스트 및 HTML 가져오기
+                            links = row.find_elements(By.TAG_NAME, "a")
+                            if not links:
+                                continue  # 헤더 행 건너뜀
+
                             row_text = (row.get_attribute("innerText") or row.text).replace(" ", "").replace("\n", "")
                             row_text_ko = re.sub(r'[^가-힣0-9]', '', row_text)
-                            
-                            # [국방부 특수 처리] 첫 번째 결과 우선권
-                            if is_mnd and idx == 0:
-                                links = row.find_elements(By.TAG_NAME, "a")
-                                if links:
-                                    target_link = links[0]
-                                    print(f"   ✅ [국방부] 첫 번째 결과 자동 매칭 성공")
-                                    break
 
-                            # 1. 공고번호 매칭
-                            if match_term in row_text:
-                                links = row.find_elements(By.TAG_NAME, "a")
-                                if links:
-                                    target_link = links[0]
-                                    print(f"   ✅ 번호 매칭 성공: {match_term}")
-                                    break
-                            
-                            # 2. 공고명 매칭 (번호 실패 시)
+                            # [국방부 특수 처리] 공고번호가 검색어↔상세페이지 간 불일치하므로
+                            # 결과공고 영역에 공고가 1개 이상 있으면 → 첫 번째 링크 행을 바로 선택
+                            if is_mnd:
+                                target_link = links[0]
+                                print(f"   ✅ [국방부] 결과공고 첫 번째 항목 자동 선택: {row_text[:40]}")
+                                break
+
+                            # 일반 공고: 공고번호 매칭
+                            if match_term and match_term in row_text:
+                                target_link = links[0]
+                                print(f"   ✅ 번호 매칭 성공: {match_term}")
+                                break
+
+                            # 일반 공고: 공고명 매칭 (번호 불일치 대비)
                             if name_term and name_term in row_text_ko:
-                                links = row.find_elements(By.TAG_NAME, "a")
-                                if links:
-                                    target_link = links[0]
-                                    print(f"   ✅ 공고명 유사 매칭 성공: {name_term}")
-                                    break
+                                target_link = links[0]
+                                print(f"   ✅ 공고명 유사 매칭 성공: {name_term}")
+                                break
+
                         except: continue
                         if target_link: break
                     if target_link: break
                 except: continue
+
             
             # 2. 전수 조사 (최후의 수단: 페이지 전체에서 '결' 배지가 있는 행 탐색)
             if not target_link:
                 print("   [디버그] 섹션 기반 탐색 실패, 페이지 전체 전수 조사 시작...")
+                first_result_link = None  # 결과공고 섹션 첫 번째 링크(폴백용)
                 # 모든 tr을 가져와서 '결' 아이콘과 번호가 동시에 있는 행 찾기
                 all_rows = self.driver.find_elements(By.TAG_NAME, "tr")
                 for row in all_rows:
                     try:
                         row_html = row.get_attribute("innerHTML")
                         if 'alt="결"' in row_html:
+                            row_links = row.find_elements(By.TAG_NAME, "a")
+                            if row_links and first_result_link is None:
+                                first_result_link = row_links[0]  # 폴백: 결 배지 있는 첫 번째 행
                             row_text = (row.get_attribute("innerText") or row.text).replace(" ", "")
                             if match_term in row_text:
-                                target_link = row.find_element(By.TAG_NAME, "a")
+                                target_link = row_links[0] if row_links else None
                                 print(f"   ✅ 페이지 전수 조사(결 배지)로 결과 항목 발견")
                                 break
                     except: continue
+                
+                # 3. 폴백: 번호 매칭 실패해도 결과공고 섹션에 항목이 1개뿐이면 자동 선택
+                if not target_link and first_result_link:
+                    target_link = first_result_link
+                    print(f"   ✅ [폴백] 결과공고 섹션 첫 번째 항목 자동 선택 (번호 매칭 불일치 대응)")
 
             if target_link:
                 self.driver.execute_script("arguments[0].click();", target_link)
@@ -422,8 +467,9 @@ class KbidParser:
             return False
 
     def parse_full_results(self):
-        """결과 데이터 추출 (참여업체, 사정률, 1등, AIR/에어 등)"""
+        """결과 데이터 추출 (공고기관, 참여업체, 사정률, 1등, AIR/에어 등)"""
         data = {
+            "공고기관": self.get_agency(),
             "참여 업체수": "", "사정률": "", "1등 상호명": "",
             "1등 업체 입찰금액": "", "1등 업체 사정률": "",
             "AIR 채호원 입찰금액": "-", "AIR 채호원 사정률": "-", "AIR 채호원 순위": "-",
@@ -469,22 +515,42 @@ class KbidParser:
             self.driver.get(search_url)
             time.sleep(2)
             
+            # [디버그] 채호원 검색 후 페이지 HTML 저장
+            try:
+                with open("chaehowon_search_debug.html", "w", encoding="utf-8") as f:
+                    f.write(self.driver.page_source)
+                print("   [디버그] 채호원 검색 결과 HTML 저장: chaehowon_search_debug.html")
+            except Exception as e_html:
+                print(f"   [디버그] HTML 저장 실패: {e_html}")
+            
             headers, rows = self._get_table_data()
+            print(f"   [디버그] 테이블 헤더: {headers}")
+            print(f"   [디버그] 테이블 행 수: {len(rows)}")
+            for i, row in enumerate(rows):
+                print(f"   [디버그] 행[{i}]: {row}")
+            
             found_air = False
             found_corp = False
             
             for row in rows:
-                name = self._get_cell(row, headers, "상호").replace(" ", "")
+                # '상호명' 또는 '상호' 컬럼 모두 대응
+                name = (self._get_cell(row, headers, "상호명") or self._get_cell(row, headers, "상호")).replace(" ", "")
+                # '업체사정률' 또는 '사정률' 컬럼 모두 대응
+                def get_rate(r, h):
+                    return self._get_cell(r, h, "업체사정률") or self._get_cell(r, h, "사정률")
+                
                 if "AIR채호원" in name and not found_air:
                     data["AIR 채호원 입찰금액"] = self._format_amount(self._get_cell(row, headers, "입찰금액"))
-                    data["AIR 채호원 사정률"] = self._format_rate(self._get_cell(row, headers, "사정률"))
+                    data["AIR 채호원 사정률"] = self._format_rate(get_rate(row, headers))
                     data["AIR 채호원 순위"] = self._get_cell(row, headers, "순위")
                     found_air = True
-                if ("에어채호원" in name or "애어체호원" in name) and not found_corp:
+                    print(f"   ✅ AIR 채호원 발견: 순위={data['AIR 채호원 순위']}, 사정률={data['AIR 채호원 사정률']}")
+                if ("에어채호원" in name or "애어체호원" in name or "에어체호원" in name) and not found_corp:
                     data["에어채호원 입찰금액"] = self._format_amount(self._get_cell(row, headers, "입찰금액"))
-                    data["에어채호원 사정률"] = self._format_rate(self._get_cell(row, headers, "사정률"))
+                    data["에어채호원 사정률"] = self._format_rate(get_rate(row, headers))
                     data["에어채호원 순위"] = self._get_cell(row, headers, "순위")
                     found_corp = True
+                    print(f"   ✅ 에어채호원 발견: 순위={data['에어채호원 순위']}, 사정률={data['에어채호원 사정률']}")
                 if found_air and found_corp: break
             
             if found_air or found_corp:
@@ -493,6 +559,7 @@ class KbidParser:
                 print("   ⚠️ 검색 결과 내에 대상 업체(채호원)가 없습니다.")
         except Exception as e:
             print(f"   ⚠️ 채호원 검색 중 오류: {e}")
+            import traceback; traceback.print_exc()
 
     def _find_text_by_label(self, label):
         try:
@@ -500,12 +567,38 @@ class KbidParser:
             return self.driver.find_element(By.XPATH, xpath).text.strip()
         except: return ""
 
+    def get_agency(self):
+        """공고기관 정보 추출 (img 태그 제거)"""
+        try:
+            xpath = "//th[contains(text(), '공고기관')]/following-sibling::td[1]"
+            element = self.driver.find_element(By.XPATH, xpath)
+            # JavaScript로 img 태그 제거 후 텍스트만 추출
+            script = """
+                var elem = arguments[0];
+                var clone = elem.cloneNode(true);
+                var imgs = clone.querySelectorAll('img');
+                imgs.forEach(img => img.remove());
+                return clone.textContent.trim();
+            """
+            text = self.driver.execute_script(script, element)
+            return text.strip() if text else ""
+        except:
+            return ""
+
 
     def _get_table_data(self):
         """다양한 셀렉터로 테이블을 시도하고 데이터 반환"""
         table = None
-        selectors = KbidConfig.SELECTORS["ranking_table"]
-        if isinstance(selectors, str): selectors = [selectors]
+        # 낙찰순위 전용 XPath를 우선순위 최상위로 추가 (개찰결과 테이블과 구분)
+        extra_selectors = [
+            "//h4[contains(.,'낙찰순위')]/following-sibling::table[1]",  # "낙찰순위" 제목 바로 다음 형제 테이블
+            "//div[contains(@class,'result_com_search')]/following-sibling::table[1]",  # 검색 폼 다음 테이블
+            "//table[@class='tbl_result_coms' and not(contains(@class, 'tbl_result_one'))]",  # 결과 테이블 중 '개찰결과' 제외
+            "//h3[contains(.,'낙찰순위') or contains(.,'개찰결과')]/following::table[1]",
+            "//div[contains(@class,'result') or contains(@id,'Result')]//table",
+            "//caption[contains(.,'낙찰순위')]/ancestor::table",
+        ]
+        selectors = extra_selectors + list(KbidConfig.SELECTORS["ranking_table"])
         
         for sel in selectors:
             try:
@@ -515,10 +608,30 @@ class KbidParser:
                     table = self.driver.find_element(By.ID, sel[1:])
                 else:
                     table = self.driver.find_element(By.CSS_SELECTOR, sel)
-                if table.is_displayed(): break
+                if table and table.is_displayed():
+                    print(f"   [디버그] 테이블 셀렉터 매칭: {sel[:60]}")
+                    break
+                table = None
             except: continue
-            
-        if not table: return [], []
+        
+        # 마지막 폴백: 페이지의 모든 table 중 td가 가장 많은 것
+        if not table:
+            all_tables = self.driver.find_elements(By.TAG_NAME, "table")
+            best, best_count = None, 0
+            for t in all_tables:
+                try:
+                    cnt = len(t.find_elements(By.TAG_NAME, "td"))
+                    if cnt > best_count:
+                        best_count = cnt
+                        best = t
+                except: continue
+            if best_count > 0:
+                table = best
+                print(f"   [디버그] 폴백: td가 가장 많은 테이블 선택 (td={best_count}개)")
+
+        if not table:
+            print("   [디버그] 테이블을 찾지 못했습니다.")
+            return [], []
 
         try:
             header_elements = table.find_elements(By.XPATH, ".//th")
@@ -528,7 +641,8 @@ class KbidParser:
             tr_elements = table.find_elements(By.XPATH, ".//tr[td]")
             for tr in tr_elements:
                 cells = [c.text.strip() for c in tr.find_elements(By.TAG_NAME, "td")]
-                if len(cells) >= len(headers):
+                # 헤더보다 셀 수가 적어도 데이터가 있으면 허용 (colspan 등 대응)
+                if cells:
                     rows.append(cells)
             return headers, rows
         except: return [], []
