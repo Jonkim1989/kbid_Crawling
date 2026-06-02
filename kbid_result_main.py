@@ -29,6 +29,7 @@ class KbidConfig:
     CLIENT_SECRETS_FILE = "client_secrets.json"
     TOKEN_FILE = "token.json"
     SPREADSHEET_NAME = "입찰관리"
+    DEBUG_HISTORY_FOLDER = "debug_history"
     
     SELECTORS = {
         "login_check": ["//*[contains(text(), '로그아웃')]", "//a[contains(@href, 'logout')]"],
@@ -50,35 +51,45 @@ class GoogleSheetsManager:
         self.ws = self.sheet.worksheet("투찰준비")
         self._ensure_result_headers()
 
+    def _extract_bid_base_and_serial(self, bid_no):
+        """공고번호를 기본 부분과 일련번호로 분해
+        예: 'R26BK01526419-002' -> ('R26BK01526419', 2)
+        예: 'R26BK01526419' -> ('R26BK01526419', -1)
+        """
+        bid_no = str(bid_no).strip()
+        # 기본 부분과 일련번호 분리 (대시로 분리)
+        if '-' in bid_no:
+            parts = bid_no.rsplit('-', 1)  # 마지막 대시로 분리
+            base = parts[0].strip()
+            try:
+                serial = int(parts[1].strip())
+            except ValueError:
+                # 일련번호가 숫자가 아니면 전체를 기본으로 취급
+                base = bid_no
+                serial = -1
+        else:
+            base = bid_no
+            serial = -1  # 일련번호가 없음을 표시
+        return base, serial
+
     def _ensure_result_headers(self):
         """결과 확인에 필요한 컬럼들이 있는지 확인하고 순서 동기화"""
         current_headers = [h.strip() for h in self.ws.row_values(1)]
         
-        # 기본 필드 (결과와 무관한 앞부분)
-        base_fields = [
-            "투찰상태", "공고번호", "공고기관", "공고명", "지역제한", "입찰개시일", "투찰마감일시", "개찰일시",
-            "기초금액", "예가변동폭", "투찰하한율", "계약방법",
-            "예상투찰가1", "예상투찰가2", "예상투찰가3"
-        ]
-        
-        # 사용자 요청에 따른 최종 결과 항목 리스트 (정확한 순서)
-        result_fields = [
+        # kbid_Crawling_main.py와 동일한 순서로 정렬
+        desired_headers = [
+            "투찰상태", "공고명", "공고번호", "공고기관", "지역제한", "업종", "입찰개시일", "투찰마감일시", "개찰일시",
+            "기초금액", "A값", "예가변동폭", "투찰하한율", "계약방법",
+            "예상투찰가1", "예상투찰가2", "예상투찰가3",
             "참여 업체수", "사정률", "1등 상호명", "1등 업체 입찰금액", "1등 업체 사정률",
             "AIR 채호원 입찰금액", "AIR 채호원 사정률", "AIR 채호원 순위",
             "에어채호원 입찰금액", "에어채호원 사정률", "에어채호원 순위"
         ]
         
-        # 1. 기존 헤더에서 결과 관련 필드 및 기본 필드 제거 (나머지 기타 필드 유지 위함)
-        all_required = base_fields + result_fields
-        others = [h for h in current_headers if h not in all_required and h.replace(" ", "") not in [r.replace(" ", "") for r in all_required]]
-        
-        # 2. 새로운 헤더 구성 (기본 + 결과 + 기타)
-        new_headers = base_fields + result_fields + others
-        
-        # 3. 변경 사항이 있는지 확인 (단순 순서 변경 포함)
-        if current_headers != new_headers:
+        # 변경 사항이 있는지 확인 (단순 순서 변경 포함)
+        if current_headers != desired_headers:
             print(f"✨ 시트 헤더 순서 및 항목을 업데이트합니다.")
-            self.ws.update(values=[new_headers], range_name="A1")
+            self.ws.update(values=[desired_headers], range_name="A1")
 
     def get_result_tasks(self):
         """개찰일시가 지났고 낙찰확인이 안 된 공고 목록 가져오기"""
@@ -282,7 +293,8 @@ class KbidBrowser:
         
         try:
             # 디버깅용: 항상 현재 검색 결과 저장 (사용자 요청)
-            with open("search_result_debug.html", "w", encoding="utf-8") as f:
+            os.makedirs(KbidConfig.DEBUG_HISTORY_FOLDER, exist_ok=True)
+            with open(f"{KbidConfig.DEBUG_HISTORY_FOLDER}/search_result_debug.html", "w", encoding="utf-8") as f:
                 f.write(self.driver.page_source)
                 
             # 1. '결과공고' 섹션 타이틀 찾기
@@ -431,7 +443,8 @@ class KbidParser:
         """'개찰결과' 화면인지 확인하고 필요시 탭 클릭"""
         # 디버깅용: 상세 페이지 소스 저장
         try:
-            with open("detail_page_debug.html", "w", encoding="utf-8") as f:
+            os.makedirs(KbidConfig.DEBUG_HISTORY_FOLDER, exist_ok=True)
+            with open(f"{KbidConfig.DEBUG_HISTORY_FOLDER}/detail_page_debug.html", "w", encoding="utf-8") as f:
                 f.write(self.driver.page_source)
         except: pass
 
@@ -473,7 +486,8 @@ class KbidParser:
             "참여 업체수": "", "사정률": "", "1등 상호명": "",
             "1등 업체 입찰금액": "", "1등 업체 사정률": "",
             "AIR 채호원 입찰금액": "-", "AIR 채호원 사정률": "-", "AIR 채호원 순위": "-",
-            "에어채호원 입찰금액": "-", "에어채호원 사정률": "-", "에어채호원 순위": "-"
+            "에어채호원 입찰금액": "-", "에어채호원 사정률": "-", "에어채호원 순위": "-",
+            "A값": ""
         }
         
         # 요약 정보 (참여 업체수, 사정률)
@@ -517,7 +531,8 @@ class KbidParser:
             
             # [디버그] 채호원 검색 후 페이지 HTML 저장
             try:
-                with open("chaehowon_search_debug.html", "w", encoding="utf-8") as f:
+                os.makedirs(KbidConfig.DEBUG_HISTORY_FOLDER, exist_ok=True)
+                with open(f"{KbidConfig.DEBUG_HISTORY_FOLDER}/chaehowon_search_debug.html", "w", encoding="utf-8") as f:
                     f.write(self.driver.page_source)
                 print("   [디버그] 채호원 검색 결과 HTML 저장: chaehowon_search_debug.html")
             except Exception as e_html:
@@ -720,4 +735,5 @@ class KbidResultCrawler:
             print("\n🏁 모든 작업을 마쳤습니다.")
 
 if __name__ == "__main__":
+    os.makedirs(KbidConfig.DEBUG_HISTORY_FOLDER, exist_ok=True)
     KbidResultCrawler().run()
