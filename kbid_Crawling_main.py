@@ -149,7 +149,8 @@ class GoogleSheetsManager:
             name = next((v for k, v in row.items() if "공고명" in k), "")
             num = next((v for k, v in row.items() if "공고번호" in k), "")
             if name or num:
-                clean_name = re.sub(r'^(?:결|전|수|취)\s*', '', str(name)).strip()
+                # 상태 표시 접두사 제거 (반드시 공백이 있는 경우에만 제거하여 '전기', '전자' 등이 '기', '자'로 훼손되는 것 방지)
+                clean_name = re.sub(r'^(?:결|전|수|취)\s+', '', str(name)).strip()
                 clean_name = clean_name.replace("(과거 공고)", "").replace("(취소)", "").strip()
                 tasks.append({"name": clean_name, "num": str(num).strip()})
         return tasks
@@ -413,17 +414,16 @@ class KbidBrowser:
         return driver
 
     def wait_for_login(self):
-        """수동 로그인 대기 (10초 타임아웃 with 카운트다운)
-        - 로그인 감지되어도 카운트다운은 끝까지 진행
-        - 0초 도달 후 다음 단계로 진행
-        - 진행 중 막히면 로그인 실패로 간주하고 종료
+        """수동 로그인 대기 (10초 카운트다운 후 사용자 확인)
+        - 10초 카운트다운
+        - 사용자가 로그인 완료했는지 터미널에서 확인
+        - y 입력 시 검색 페이지로 이동
         """
         print("\n🔑 로그인을 확인합니다. (10초 안에 로그인해주세요)\n")
         self.driver.get(KbidConfig.LOGIN_URL)
         
         start_time = time.time()
         timeout = 10
-        login_detected = False
         
         while time.time() - start_time < timeout:
             try:
@@ -433,15 +433,6 @@ class KbidBrowser:
                 # 남은 시간을 백분율로 표시
                 progress_bar = "█" * elapsed + "░" * remaining
                 print(f"\r⏳ [{progress_bar}] {remaining}초 남음", end="", flush=True)
-                
-                # 로그인 상태 확인 (로그아웃 버튼 존재 여부 등)
-                is_logged_in = "login" not in self.driver.current_url.lower() or \
-                              self.driver.find_elements(By.XPATH, "//*[contains(text(), '로그아웃')]")
-                
-                if is_logged_in and not login_detected:
-                    print("\n✅ 로그인 감지됨! 나머지 시간 대기 중...\n")
-                    login_detected = True
-                    # 카운트다운은 계속 진행
                 
                 time.sleep(0.5)
                 
@@ -465,33 +456,44 @@ class KbidBrowser:
         # 카운트다운 완료 (0초 도달)
         print("\n")
         
-        # 10초 타임아웃 후: 로그인 감지 안 됐어도 최종 URL 확인
-        if not login_detected:
-            try:
-                current_url = self.driver.current_url.lower()
-                if "login" not in current_url:
-                    # URL이 로그인 페이지가 아니면 로그인된 것으로 간주
-                    print("✅ 로그인 상태 확인됨!\n")
-                    login_detected = True
-            except:
-                pass
+        # 사용자 확인 루프
+        while True:
+            user_input = input("✅ 로그인을 완료하셨습니까? (y/n): ").strip().lower()
+            
+            if user_input == 'y':
+                print("🔄 검색 페이지로 이동 중...\n")
+                break
+            elif user_input == 'n':
+                print("⏳ 로그인을 완료한 후 다시 입력해주세요.")
+                continue
+            else:
+                print("⚠️ y 또는 n을 입력해주세요.")
+                continue
         
-        if not login_detected:
-            print("❌ 로그인 대기 시간 초과 (10초) - 프로그램을 종료합니다.")
-            return False
-        
-        # 카운트다운 완료 후 검색 페이지로 이동 시도
-        print("   [공고 검색 페이지 이동] 시도...")
+        # 검색 페이지로 이동
+        print("   [공고 검색 페이지 이동] 진행 중...")
         try:
             self.driver.get(KbidConfig.SEARCH_URL_TEMPLATE.format(""))
-            time.sleep(5)
-            print("   ✅ 공고 검색 페이지 로드 완료\n")
+            
+            # 페이지 로드 완료 대기 (최대 15초)
+            for attempt in range(15):
+                try:
+                    page_state = self.driver.execute_script("return document.readyState")
+                    if page_state == "complete":
+                        print("   ✅ 공고 검색 페이지 로드 완료\n")
+                        return True
+                except:
+                    pass
+                time.sleep(1)
+            
+            # 15초 대기 후 성공으로 간주
+            print("   ✅ 공고 검색 페이지 로드 완료 (타임아웃)\n")
             return True
+            
         except Exception as e:
-            print(f"   ❌ 공고 검색 페이지 이동 실패: {str(e)[:100]}")
-            print("   로그인이 제대로 이루어지지 않은 것으로 판단됩니다.")
-            print("   프로그램을 종료합니다.")
-            return False
+            print(f"   ⚠️ 공고 검색 페이지 이동: {str(e)[:100]}")
+            print("   계속 진행합니다...")
+            return True
 
     def navigate_to_bid(self, task):
         """공고명/번호로 검색 후 정확한 공고번호 확인하여 상세 페이지 이동"""
@@ -1432,7 +1434,7 @@ class KbidParser:
             print(f"   ⚠️ 예상투찰가 계산 실패: {e}")
         
         try:
-            # JS를 사용해 DOM 조작으로 불필요한 태그(img 등) 제거 후 텍스트 추출
+            # JS를 사용해 DOM 조작으로 불필요한 태그(img, 아이콘 span 등) 제거 후 텍스트 추출
             script = """
                 var elem = document.querySelector(arguments[0]);
                 if (!elem) return '';
@@ -1441,9 +1443,20 @@ class KbidParser:
                 var imgs = clone.querySelectorAll('img');
                 imgs.forEach(img => img.remove());
                 
-                // 2. 투찰마감 등 특정 텍스트를 가진 독립된 태그 제거
+                // 2. 공고 종류 표시 span 아이콘 제거 (예: <span class="ico-bid kind5">전</span>) 
+                // span 태그만 제거하고 텍스트 노드는 보존하도록 함
+                var iconSpans = clone.querySelectorAll('span[class*="ico-bid"], span[class*="kind"]');
+                iconSpans.forEach(span => {
+                    while (span.firstChild) {
+                        span.parentNode.insertBefore(span.firstChild, span);
+                    }
+                    span.parentNode.removeChild(span);
+                });
+                
+                // 3. 투찰마감 등 특정 텍스트를 가진 독립된 태그 제거
+                // (주의: '전' 단독 제거는 제거함 - 공고명의 첫 글자가 '전기', '전자' 등인 경우 보호)
                 var els = clone.querySelectorAll('*');
-                var removeTexts = ['투찰마감', '결과확인', '투찰대기', '입찰마감', '투찰완료', '전', '긴', '결', '수', '취', '견', '재', '전자', '긴급', '취소', '과거 공고', '지난공고', '지나온공고'];
+                var removeTexts = ['투찰마감', '결과확인', '투찰대기', '입찰마감', '투찰완료', '긴', '결', '수', '취', '견', '재', '전자', '긴급', '취소', '과거 공고', '지난공고', '지나온공고'];
                 els.forEach(el => {
                     if (removeTexts.includes(el.textContent.trim())) {
                         el.remove();
@@ -1461,13 +1474,13 @@ class KbidParser:
             for word in ['투찰마감', '결과확인', '투찰대기', '입찰마감', '투찰완료']:
                 clean_title = clean_title.replace(word, "")
                 
-            # 괄호로 둘러싸인 접두사/접미사 제거
-            clean_title = re.sub(r'[\[\(<](?:긴|전|취|긴급|전자|취소|지난공고|지나온공고|공고|재공고|재공고입찰|견적)[\]\)>]', '', clean_title)
+            # 괄호로 둘러싸인 접두사/접미사 제거 ('전' 제거 안 함 - 공고명이 '전기' 등인 경우 보호)
+            clean_title = re.sub(r'[\[\(<](?:긴|취|긴급|전자|취소|지난공고|지나온공고|공고|재공고|재공고입찰|견적)[\]\)>]', '', clean_title)
             clean_title = clean_title.replace("(취소)", "").replace("(과거 공고)", "")
             clean_title = clean_title.replace("(재공고)", "").replace("[재공고]", "").replace("<재공고입찰>", "").replace("(견적)", "")
             
-            # 띄어쓰기가 있는 접두사 제거 (예: "전 긴 용인..." -> "용인...")
-            clean_title = re.sub(r'^(?:긴|전|취|급|수|결|견|재)\s+', '', clean_title).replace("복사", "")
+            # 띄어쓰기가 있는 접두사 제거 (예: "긴 용인..." -> "용인...") - '전' 제거 안 함
+            clean_title = re.sub(r'^(?:긴|취|급|수|결|견|재)\s+', '', clean_title).replace("복사", "")
             
             data["공고명"] = re.sub(r'\s+', ' ', clean_title).strip()
         except: pass
@@ -1589,17 +1602,8 @@ class KbidCrawler:
                 print("📝 작업할 공고가 없습니다. 투찰준비 시트 상태를 먼저 확인했습니다.")
                 return
 
-            self.browser = KbidBrowser(self.gs)
-            self.parser = KbidParser(self.browser.driver)
-            
-            if not tasks:
-                print("📝 작업할 공고가 없습니다.")
-                return
-
-            # 2. 로그인 수행
-            if not self.browser.wait_for_login(): return
-
-            # 기초금액 누락 공고 목록 사전 조회 (시트에서 기초금액이 비어있는 공고번호 집합)
+            # [최적화] 기초금액 누락 공고 목록 사전 조회 (로그인 전에 처리)
+            # 이것은 로그인이 필요 없으므로 여기서 처리하여 로그인 후 지연 방지
             try:
                 ws_prepare = self.gs.sheet.worksheet("투찰준비")
                 headers_row = [h.replace("*", "").strip() for h in ws_prepare.row_values(1)]
@@ -1613,10 +1617,21 @@ class KbidCrawler:
                     if bid_no_val and not base_price_val:
                         missing_base_price_bids.add(bid_no_val)
                 if missing_base_price_bids:
-                    print(f"⚠️ 기초금액 누락 공고 {len(missing_base_price_bids)}건 재확인 예정: {missing_base_price_bids}")
+                    print(f"⚠️ 기초금액 누락 공고 {len(missing_base_price_bids)}건 재확인 예정")
             except Exception as e:
                 print(f"⚠️ 기초금액 누락 조회 중 오류 (무시): {e}")
                 missing_base_price_bids = set()
+
+            self.browser = KbidBrowser(self.gs)
+            self.parser = KbidParser(self.browser.driver)
+            
+            if not tasks:
+                print("📝 작업할 공고가 없습니다.")
+                return
+
+            # [최적화] 로그인 수행 (사전 조회 완료 후 빠르게 진행)
+            print("\n🔐 로그인 절차를 시작합니다...")
+            if not self.browser.wait_for_login(): return
 
             # 3. 공고 순회 크롤링
             for task in tasks:
