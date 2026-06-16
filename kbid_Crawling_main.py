@@ -495,6 +495,16 @@ class KbidBrowser:
             print("   계속 진행합니다...")
             return True
 
+    def _get_debug_folder(self):
+        """현재 날짜를 기반으로 한 디버그 폴더 경로 반환 (YYYYMMDD 형식)
+        폴더가 없으면 자동으로 생성합니다.
+        예: debug_history/20260616/detail_....html
+        """
+        today = datetime.now().strftime("%Y%m%d")
+        folder_path = os.path.join(KbidConfig.DEBUG_HISTORY_FOLDER, today)
+        os.makedirs(folder_path, exist_ok=True)
+        return folder_path
+
     def navigate_to_bid(self, task):
         """공고명/번호로 검색 후 정확한 공고번호 확인하여 상세 페이지 이동"""
         name = task.get("name", "")
@@ -636,8 +646,7 @@ class KbidBrowser:
 
             # 디버깅을 위해 페이지 소스 저장
             try:
-                os.makedirs(KbidConfig.DEBUG_HISTORY_FOLDER, exist_ok=True)
-                with open(f"{KbidConfig.DEBUG_HISTORY_FOLDER}/search_debug.html", "w", encoding="utf-8") as f:
+                with open(f"{self._get_debug_folder()}/search_debug.html", "w", encoding="utf-8") as f:
                     f.write(self.driver.page_source)
                 print("   [디버그] search_debug.html 저장 완료")
             except: pass
@@ -915,8 +924,7 @@ class KbidBrowser:
             # 실패 시 디버깅용 파일 저장
             print(f"🔍 입찰공고를 찾지 못했습니다.")
             try:
-                os.makedirs(KbidConfig.DEBUG_HISTORY_FOLDER, exist_ok=True)
-                with open(f"{KbidConfig.DEBUG_HISTORY_FOLDER}/search_result_debug.html", "w", encoding="utf-8") as f:
+                with open(f"{self._get_debug_folder()}/search_result_debug.html", "w", encoding="utf-8") as f:
                     f.write(self.driver.page_source)
                 print(f"💾 search_result_debug.html 저장 완료")
             except: pass
@@ -1355,9 +1363,8 @@ class KbidParser:
 
         # 디버깅을 위해 상세 페이지 HTML 저장
         try:
-            os.makedirs(KbidConfig.DEBUG_HISTORY_FOLDER, exist_ok=True)
             safe_bid_no = bid_no.replace("/", "_").replace("\\", "_") if bid_no else "unknown"
-            html_filename = f"{KbidConfig.DEBUG_HISTORY_FOLDER}/detail_{safe_bid_no}.html"
+            html_filename = f"{self._get_debug_folder()}/detail_{safe_bid_no}.html"
             with open(html_filename, "w", encoding="utf-8") as f:
                 f.write(self.driver.page_source)
             print(f"   [디버그] 상세 페이지 HTML 저장: {html_filename}")

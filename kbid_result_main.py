@@ -169,59 +169,80 @@ class KbidBrowser:
         return driver
 
     def login(self):
-        print("🔑 로그인을 확인합니다...")
+        """수동 로그인 대기 (10초 카운트다운 후 사용자 확인)
+        - 10초 카운트다운
+        - 사용자가 로그인 완료했는지 터미널에서 확인
+        - y 입력 시 검색 페이지로 이동
+        """
+        print("\n🔑 로그인을 확인합니다. (10초 안에 로그인해주세요)\n")
         self.driver.get(KbidConfig.LOGIN_URL)
         
-        # 수동 로그인 대기 (최대 3분)
         start_time = time.time()
-        while time.time() - start_time < 180:
+        timeout = 10
+        
+        while time.time() - start_time < timeout:
             try:
-                # 로그인 상태 확인 (로그아웃 버튼 존재 여부 등)
-                is_logged_in = "login" not in self.driver.current_url.lower() or \
-                              self.driver.find_elements(By.XPATH, "//*[contains(text(), '로그아웃')]")
+                elapsed = int(time.time() - start_time)
+                remaining = timeout - elapsed
                 
-                if is_logged_in:
-                    print("✅ 로그인 성공")
-                    
-                    # [개선] 로그인 후 공고 검색 페이지로 이동을 2회 반복
-                    # (메인페이지 진입 지연 문제 해결)
-                    for attempt in range(2):
-                        time.sleep(3)
-                        print(f"   [공고 검색 페이지 이동] {attempt+1}/2 시도...")
-                        try:
-                            self.driver.get(KbidConfig.SEARCH_URL)
-                            time.sleep(10)
-                        except Exception as e:
-                            print(f"   ⚠️ 이동 중 오류: {str(e)[:100]}")
-                            try:
-                                self.driver.execute_script("window.stop();")
-                            except:
-                                pass
-                    
-                    return True
-                time.sleep(2)
+                # 남은 시간을 백분율로 표시
+                progress_bar = "█" * elapsed + "░" * remaining
+                print(f"\r⏳ [{progress_bar}] {remaining}초 남음", end="", flush=True)
+                
+                time.sleep(0.5)
+                
             except UnexpectedAlertPresentException as e:
                 alert_text = str(e.alert_text) if e.alert_text else "알 수 없는 알림"
                 print(f"\n⚠️ 알림 발생: {alert_text}")
-                print("   [안내] 브라우저에서 알림창의 '확인' 버튼을 클릭해 주세요. 그 후 작업을 계속합니다.")
+                print("   [안내] 브라우저에서 알림창의 '확인' 버튼을 클릭해 주세요.")
                 # 알림이 사라질 때까지 대기
                 while True:
                     try:
-                        time.sleep(2)
-                        self.driver.title # 알림이 있으면 여기서 예외 발생
+                        time.sleep(0.5)
+                        self.driver.title
                         break
                     except UnexpectedAlertPresentException:
                         continue
-                    except: break
+                    except: 
+                        break
             except Exception as e:
-                time.sleep(2)
+                time.sleep(0.5)
+        
+        # 카운트다운 완료 (0초 도달)
+        print("\n")
+        
+        # 사용자 확인 루프
+        while True:
+            user_input = input("✅ 로그인을 완료하셨습니까? (y/n): ").strip().lower()
+            
+            if user_input == 'y':
+                print("🔄 검색 페이지로 이동 중...\n")
+                # [개선] 로그인 후 공고 검색 페이지로 이동을 2회 반복
+                # (메인페이지 진입 지연 문제 해결)
+                for attempt in range(2):
+                    time.sleep(3)
+                    print(f"   [공고 검색 페이지 이동] {attempt+1}/2 시도...")
+                    try:
+                        self.driver.get(KbidConfig.SEARCH_URL)
+                        time.sleep(10)
+                    except Exception as e:
+                        print(f"   ⚠️ 이동 중 오류: {str(e)[:100]}")
+                        try:
+                            self.driver.execute_script("window.stop();")
+                        except:
+                            pass
                 
-        print("❌ 로그인 대기 시간 초과")
-        return False
+                return True
+            elif user_input == 'n':
+                print("⏳ 로그인을 완료한 후 다시 입력해주세요.")
+                continue
+            else:
+                print("⚠️ y 또는 n을 입력해주세요.")
+                continue
 
     def navigate_to_result_bid(self, task):
         """검색 후 '최근 결과공고' 영역에서 클릭"""
-        search_term = task["num"] if task["num"] else task["name"]
+        search_term = str(task["num"]) if task["num"] else task["name"]
         match = re.search(r'[A-Z0-9]{5,}-[A-Z0-9]+', search_term)
         clean_num = match.group() if match else search_term
         
@@ -687,9 +708,17 @@ class KbidParser:
 
 class KbidResultCrawler:
     def __init__(self):
+        print("🔄 [1/3] 구글 시트 연결 중...")
         self.gs = GoogleSheetsManager()
+        print("✅ 구글 시트 연결 완료")
+        
+        print("🔄 [2/3] 크롬 드라이버 초기화 중...")
         self.browser = KbidBrowser()
+        print("✅ 크롬 드라이버 초기화 완료")
+        
+        print("🔄 [3/3] 파서 초기화 중...")
         self.parser = KbidParser(self.browser.driver)
+        print("✅ 파서 초기화 완료")
 
     def run(self):
         try:
