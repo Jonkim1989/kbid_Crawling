@@ -16,7 +16,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import UnexpectedAlertPresentException, TimeoutException
+from selenium.common.exceptions import NoAlertPresentException, UnexpectedAlertPresentException, TimeoutException
 
 class KbidConfig:
     """설정값 및 셀렉터 관리"""
@@ -30,6 +30,16 @@ class KbidConfig:
     TOKEN_FILE = "token.json"
     SPREADSHEET_NAME = "입찰관리"
     DEBUG_HISTORY_FOLDER = "debug_history"
+
+    @classmethod
+    def get_debug_folder(cls):
+        """현재 날짜를 기반으로 한 디버그 폴더 경로 반환 (YYYYMMDD 형식)
+        폴더가 없으면 자동으로 생성합니다.
+        """
+        today = datetime.now().strftime("%Y%m%d")
+        folder_path = os.path.join(cls.DEBUG_HISTORY_FOLDER, today)
+        os.makedirs(folder_path, exist_ok=True)
+        return folder_path
     
     SELECTORS = {
         "login_check": ["//*[contains(text(), '로그아웃')]", "//a[contains(@href, 'logout')]"],
@@ -314,8 +324,9 @@ class KbidBrowser:
         
         try:
             # 디버깅용: 항상 현재 검색 결과 저장 (사용자 요청)
-            os.makedirs(KbidConfig.DEBUG_HISTORY_FOLDER, exist_ok=True)
-            with open(f"{KbidConfig.DEBUG_HISTORY_FOLDER}/search_result_debug.html", "w", encoding="utf-8") as f:
+            bid_no = task.get("num", "debug") if task else "debug"
+            safe_bid_no = bid_no.replace("/", "_").replace("\\", "_") if bid_no else "debug"
+            with open(f"{KbidConfig.get_debug_folder()}/search_result_{safe_bid_no}.html", "w", encoding="utf-8") as f:
                 f.write(self.driver.page_source)
                 
             # 1. '결과공고' 섹션 타이틀 찾기
@@ -437,6 +448,17 @@ class KbidParser:
     def __init__(self, driver):
         self.driver = driver
 
+    def _dismiss_alert(self):
+        try:
+            alert = self.driver.switch_to.alert
+        except NoAlertPresentException:
+            return None
+
+        alert_text = alert.text
+        alert.accept()
+        print(f"   [알림 닫음] {alert_text}")
+        return alert_text
+
     def _format_amount(self, text):
         """금액 텍스트에서 숫자만 추출하여 1,000 단위 표시 (원 제거)"""
         if not text: return text
@@ -460,17 +482,29 @@ class KbidParser:
         if text == "-": return text
         return str(text).replace("%", "").strip()
 
-    def verify_result_page(self):
+    def verify_result_page(self, task=None):
         """'개찰결과' 화면인지 확인하고 필요시 탭 클릭"""
+        try:
+            if self._dismiss_alert() is not None:
+                return False
+        except UnexpectedAlertPresentException:
+            self._dismiss_alert()
+            return False
+
         # 디버깅용: 상세 페이지 소스 저장
         try:
-            os.makedirs(KbidConfig.DEBUG_HISTORY_FOLDER, exist_ok=True)
-            with open(f"{KbidConfig.DEBUG_HISTORY_FOLDER}/detail_page_debug.html", "w", encoding="utf-8") as f:
+            bid_no = task.get("num", "debug") if task else "debug"
+            safe_bid_no = bid_no.replace("/", "_").replace("\\", "_") if bid_no else "debug"
+            with open(f"{KbidConfig.get_debug_folder()}/detail_{safe_bid_no}.html", "w", encoding="utf-8") as f:
                 f.write(self.driver.page_source)
         except: pass
 
         # 1. 페이지 내에 '낙찰순위' 또는 '개찰결과'라는 텍스트가 큰 제목으로 있는지 확인 (이미 진입했을 가능성)
-        body_text = self.driver.page_source
+        try:
+            body_text = self.driver.page_source
+        except UnexpectedAlertPresentException:
+            self._dismiss_alert()
+            return False
         if "낙찰순위" in body_text or "참여업체" in body_text:
             print("   [디버그] 이미 개찰결과 데이터가 화면에 보입니다.")
             return True
@@ -500,7 +534,7 @@ class KbidParser:
         except:
             return False
 
-    def parse_full_results(self):
+    def parse_full_results(self, task=None):
         """결과 데이터 추출 (공고기관, 참여업체, 사정률, 1등, AIR/에어 등)"""
         data = {
             "공고기관": self.get_agency(),
@@ -532,11 +566,11 @@ class KbidParser:
             data["1등 업체 사정률"] = self._format_rate(self._get_cell(first_row, headers, "사정률"))
 
         # 3. 채호원 검색 (AIR/에어 정보 추출용)
-        self._search_and_parse_target_companies(data)
+        self._search_and_parse_target_companies(data, task)
         
         return data
 
-    def _search_and_parse_target_companies(self, data):
+    def _search_and_parse_target_companies(self, data, task=None):
         """URL 조작을 통한 '채호원' 검색 및 데이터 추출"""
         try:
             current_url = self.driver.current_url
@@ -552,10 +586,11 @@ class KbidParser:
             
             # [디버그] 채호원 검색 후 페이지 HTML 저장
             try:
-                os.makedirs(KbidConfig.DEBUG_HISTORY_FOLDER, exist_ok=True)
-                with open(f"{KbidConfig.DEBUG_HISTORY_FOLDER}/chaehowon_search_debug.html", "w", encoding="utf-8") as f:
+                bid_no = task.get("num", "debug") if task else "debug"
+                safe_bid_no = bid_no.replace("/", "_").replace("\\", "_") if bid_no else "debug"
+                with open(f"{KbidConfig.get_debug_folder()}/chaehowon_{safe_bid_no}.html", "w", encoding="utf-8") as f:
                     f.write(self.driver.page_source)
-                print("   [디버그] 채호원 검색 결과 HTML 저장: chaehowon_search_debug.html")
+                print(f"   [디버그] 채호원 검색 결과 HTML 저장: chaehowon_{safe_bid_no}.html")
             except Exception as e_html:
                 print(f"   [디버그] HTML 저장 실패: {e_html}")
             
@@ -729,8 +764,8 @@ class KbidResultCrawler:
             for task in tasks:
                 print(f"\n🔍 [{task['num']}] {task['name']} 처리 중...")
                 if self.browser.navigate_to_result_bid(task):
-                    if self.parser.verify_result_page():
-                        result_data = self.parser.parse_full_results()
+                    if self.parser.verify_result_page(task):
+                        result_data = self.parser.parse_full_results(task)
                         
                         # 가이드라인: 모든 페이지를 확인했으나 대상 업체가 없다면 '확인불가'로 처리
                         # (단, 1등 정보는 수집된 상태일 수 있음)

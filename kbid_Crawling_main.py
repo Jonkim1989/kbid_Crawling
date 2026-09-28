@@ -34,6 +34,16 @@ class KbidConfig:
     SPREADSHEET_NAME = "입찰관리"
     DEBUG_HISTORY_FOLDER = "debug_history"
     
+    @classmethod
+    def get_debug_folder(cls):
+        """현재 날짜를 기반으로 한 디버그 폴더 경로 반환 (YYYYMMDD 형식)
+        폴더가 없으면 자동으로 생성합니다.
+        """
+        today = datetime.now().strftime("%Y%m%d")
+        folder_path = os.path.join(cls.DEBUG_HISTORY_FOLDER, today)
+        os.makedirs(folder_path, exist_ok=True)
+        return folder_path
+    
     SELECTORS = {
         "login_check": [
             "//*[contains(text(), '로그아웃')]",
@@ -90,7 +100,7 @@ class GoogleSheetsManager:
                 "예상투찰가1", "예상투찰가2", "예상투찰가3",
                 "참여 업체수", "사정률", "1등 상호명", "1등 업체 입찰금액", "1등 업체 사정률",
                 "AIR 채호원 입찰금액", "AIR 채호원 사정률", "AIR 채호원 순위",
-                "에어채호원 입찰금액", "에어채호원 사정률", "에어채호원 순위"
+                "에어채호원 입찰금액", "에어채호원 사정률", "에어채호원 순위", "입찰제한"
             ]
             ws_prepare.append_row(headers)
         except: pass
@@ -141,13 +151,22 @@ class GoogleSheetsManager:
     def get_search_terms(self):
         """'입찰공고' 시트에서 '공고명' 및 '공고번호' 데이터를 가져옵니다."""
         ws = self.sheet.worksheet("입찰공고")
-        all_data = ws.get_all_records()
+        rows = ws.get_all_values()
+        if not rows:
+            return []
+        
+        headers = rows[0]
+        # '공고명' 및 '공고번호'가 포함된 헤더의 인덱스 찾기
+        name_idx = next((i for i, h in enumerate(headers) if "공고명" in h), -1)
+        num_idx = next((i for i, h in enumerate(headers) if "공고번호" in h), -1)
         
         tasks = []
-        for row in all_data:
-            # 헤더 이름에 '*'가 포함될 수 있으므로 유연하게 처리
-            name = next((v for k, v in row.items() if "공고명" in k), "")
-            num = next((v for k, v in row.items() if "공고번호" in k), "")
+        if name_idx == -1 and num_idx == -1:
+            return tasks
+            
+        for row in rows[1:]:
+            name = row[name_idx] if 0 <= name_idx < len(row) else ""
+            num = row[num_idx] if 0 <= num_idx < len(row) else ""
             if name or num:
                 # 상태 표시 접두사 제거 (반드시 공백이 있는 경우에만 제거하여 '전기', '전자' 등이 '기', '자'로 훼손되는 것 방지)
                 clean_name = re.sub(r'^(?:결|전|수|취)\s+', '', str(name)).strip()
@@ -496,14 +515,7 @@ class KbidBrowser:
             return True
 
     def _get_debug_folder(self):
-        """현재 날짜를 기반으로 한 디버그 폴더 경로 반환 (YYYYMMDD 형식)
-        폴더가 없으면 자동으로 생성합니다.
-        예: debug_history/20260616/detail_....html
-        """
-        today = datetime.now().strftime("%Y%m%d")
-        folder_path = os.path.join(KbidConfig.DEBUG_HISTORY_FOLDER, today)
-        os.makedirs(folder_path, exist_ok=True)
-        return folder_path
+        return KbidConfig.get_debug_folder()
 
     def navigate_to_bid(self, task):
         """공고명/번호로 검색 후 정확한 공고번호 확인하여 상세 페이지 이동"""
@@ -1042,6 +1054,76 @@ class KbidParser:
         print("   [기초금액] 모든 패턴 실패 → 빈값 반환")
         return ""
 
+    def get_bid_restrictions(self):
+        """HTML 페이지에서 입찰 제한 정보 추출
+        대표적인 제한: 입찰 참가 신청, 실적제한, 공종/업종 제한, 공사실적, 면허보유, 현장 설명회, 직접생산
+        """
+        restrictions = []
+        
+        # 1. 여러 제한 관련 라벨들로 get_val() 시도
+        restriction_labels = [
+            "입찰 참가 신청",
+            "입찰 참가 제한",
+            "실적제한",
+            "공종 제한",
+            "업종 제한",
+            "공사실적",
+            "면허",
+            "현장 설명회",
+            "현장설명회",
+            "직접생산",
+            "부가가치세 면세",
+            "중소기업",
+            "외국인",
+            "구성원 조건"
+        ]
+        
+        for label in restriction_labels:
+            try:
+                val = self.get_val(label)
+                if val and val.strip() and val not in ["-", ""]:
+                    # 예: "입찰 참가 신청: 필수" -> "입찰 참가 신청"
+                    if val.lower() not in ["무", "없음", "없음요", "x"]:
+                        restrictions.append(f"{label}")
+            except:
+                pass
+        
+        # 2. HTML 페이지 전체에서 제한 관련 키워드 찾기
+        try:
+            page_text = self.driver.page_source.lower()
+            keywords = {
+                "입찰 참가 신청": ["입찰.*신청"],
+                "실적제한": ["실적.*제한", "시공.*실적"],
+                "공종 제한": ["공종.*제한", "공종.*조건"],
+                "업종 제한": ["업종.*제한"],
+                "공사실적": ["공사.*실적"],
+                "면허": ["전문.*면허", "사업.*면허"],
+                "현장 설명회": ["현장.*설명회", "설명회.*참석"],
+                "직접생산": ["직접.*생산"],
+                "중소기업": ["중소.*기업", "중소기업"],
+                "외국인": ["외국인.*제외", "외국인.*제한"]
+            }
+            
+            for key, patterns in keywords.items():
+                for pattern in patterns:
+                    if re.search(pattern, page_text) and key not in restrictions:
+                        restrictions.append(key)
+                        break
+        except:
+            pass
+        
+        # 3. 중복 제거 및 정렬
+        restrictions = list(set(restrictions))
+        restrictions.sort()
+        
+        # 결과 반환
+        if restrictions:
+            result = ", ".join(restrictions)
+            print(f"   📋 입찰제한 감지: {result}")
+            return result
+        else:
+            return ""
+
     def get_val_a_price(self):
         """A값 추출 (합산(A) 행에서)"""
         # 패턴 1: 기본 th/td 방식으로 "합산(A)" 찾기
@@ -1364,7 +1446,7 @@ class KbidParser:
         # 디버깅을 위해 상세 페이지 HTML 저장
         try:
             safe_bid_no = bid_no.replace("/", "_").replace("\\", "_") if bid_no else "unknown"
-            html_filename = f"{self._get_debug_folder()}/detail_{safe_bid_no}.html"
+            html_filename = f"{KbidConfig.get_debug_folder()}/detail_{safe_bid_no}.html"
             with open(html_filename, "w", encoding="utf-8") as f:
                 f.write(self.driver.page_source)
             print(f"   [디버그] 상세 페이지 HTML 저장: {html_filename}")
@@ -1389,7 +1471,8 @@ class KbidParser:
             "A값": self._format_amount(self.get_val_a_price()),
             "예가변동폭": self.get_val("예가변동폭"),
             "투찰하한율": self.get_val("투찰하한율"),
-            "계약방법": self.get_val("계약방법")
+            "계약방법": self.get_val("계약방법"),
+            "입찰제한": self.get_bid_restrictions()
         }
         
         # [수정] 예상투찰가 자동 계산
@@ -1594,7 +1677,7 @@ class KbidCrawler:
             traceback.print_exc()
 
 
-    def run(self):
+    def run(self):          
         try:
             # 1. 투찰준비 시트의 상태를 최신화
             updated_count = self.gs.update_bid_statuses()
@@ -1609,25 +1692,7 @@ class KbidCrawler:
                 print("📝 작업할 공고가 없습니다. 투찰준비 시트 상태를 먼저 확인했습니다.")
                 return
 
-            # [최적화] 기초금액 누락 공고 목록 사전 조회 (로그인 전에 처리)
-            # 이것은 로그인이 필요 없으므로 여기서 처리하여 로그인 후 지연 방지
-            try:
-                ws_prepare = self.gs.sheet.worksheet("투찰준비")
-                headers_row = [h.replace("*", "").strip() for h in ws_prepare.row_values(1)]
-                base_price_col_idx = headers_row.index("기초금액") if "기초금액" in headers_row else -1
-                bid_no_col_idx = headers_row.index("공고번호") if "공고번호" in headers_row else 1
-                all_rows = ws_prepare.get_all_values()[1:]  # 헤더 제외
-                missing_base_price_bids = set()
-                for row in all_rows:
-                    bid_no_val = row[bid_no_col_idx].strip() if len(row) > bid_no_col_idx else ""
-                    base_price_val = row[base_price_col_idx].strip() if base_price_col_idx >= 0 and len(row) > base_price_col_idx else ""
-                    if bid_no_val and not base_price_val:
-                        missing_base_price_bids.add(bid_no_val)
-                if missing_base_price_bids:
-                    print(f"⚠️ 기초금액 누락 공고 {len(missing_base_price_bids)}건 재확인 예정")
-            except Exception as e:
-                print(f"⚠️ 기초금액 누락 조회 중 오류 (무시): {e}")
-                missing_base_price_bids = set()
+
 
             self.browser = KbidBrowser(self.gs)
             self.parser = KbidParser(self.browser.driver)
@@ -1652,12 +1717,8 @@ class KbidCrawler:
                     clean_num = match.group() if match else num
                     
                     if clean_num and clean_num in processed_bids:
-                        # 기초금액이 누락된 경우에는 재크롤링 시도
-                        if clean_num in missing_base_price_bids:
-                            print(f"🔄 기초금액 누락으로 재크롤링: {clean_num}")
-                        else:
-                            print(f"⏩ 이미 시트에 있는 공고이므로 건너뜁니다: {clean_num}")
-                            continue
+                        print(f"⏩ 이미 시트에 있는 공고이므로 건너뜁니다: {clean_num}")
+                        continue
 
                     print(f"\n🔍 작업 확인: {display_name}")
                     
@@ -1706,74 +1767,8 @@ class KbidCrawler:
                 
                 time.sleep(0.3)
             
-            # --- [추가 기능] 투찰준비 시트의 기초금액 누락 행 재탐색 ---
-            print("\n🔄 투찰준비 시트의 기초금액 누락 행 재탐색을 시작합니다.")
-            try:
-                ws_prepare = self.gs.sheet.worksheet("투찰준비")
-                headers_row = [h.replace("*", "").strip() for h in ws_prepare.row_values(1)]
-                base_price_col_idx = headers_row.index("기초금액") if "기초금액" in headers_row else -1
-                bid_no_col_idx = headers_row.index("공고번호") if "공고번호" in headers_row else 1
-                bid_name_col_idx = headers_row.index("공고명") if "공고명" in headers_row else 2
-                status_col_idx = headers_row.index("투찰상태") if "투찰상태" in headers_row else 0
-                
-                if base_price_col_idx >= 0:
-                    all_rows = ws_prepare.get_all_values()[1:]  # 헤더 제외
-                    missing_tasks = []
-                    
-                    # 기초금액이 누락되고 투찰대기 상태인 공고만 수집 (행 인덱스도 함께 저장)
-                    for row_idx, row in enumerate(all_rows, start=2):  # 2부터 시작 (헤더는 1행)
-                        bid_no_val = row[bid_no_col_idx].strip() if len(row) > bid_no_col_idx else ""
-                        bid_name_val = row[bid_name_col_idx].strip() if len(row) > bid_name_col_idx else ""
-                        base_price_val = row[base_price_col_idx].strip() if len(row) > base_price_col_idx else ""
-                        status_val = row[status_col_idx].strip() if len(row) > status_col_idx else ""
-                        
-                        # 조건: 기초금액이 비어있고, 상태가 '투찰대기'일 경우
-                        if (bid_no_val or bid_name_val) and not base_price_val and status_val == "투찰대기":
-                            missing_tasks.append({
-                                "num": bid_no_val, 
-                                "name": bid_name_val, 
-                                "row_idx": row_idx  # 기존 행 인덱스 저장
-                            })
-                    
-                    if missing_tasks:
-                        print(f"📝 기초금액 누락 공고 {len(missing_tasks)}건 발견. 재탐색을 진행합니다.")
-                        for task in missing_tasks:
-                            name = task.get("name", "").strip()
-                            num = task.get("num", "").strip()
-                            row_idx = task.get("row_idx")
-                            display_name = num or name
-                            print(f"\n🔍 [재탐색] 작업 확인: {display_name} (행 {row_idx})")
-                            
-                            try:
-                                if self.browser.navigate_to_bid(task):
-                                    res_data = self.parser.parse_all()
-                                    if name:
-                                        res_data["공고명"] = name
-                                    if num:
-                                        res_data["공고번호"] = num
-                                    
-                                    # save_result 메소드가 기존 행을 찾아 업데이트함
-                                    if self.gs.save_result(res_data):
-                                        print(f"   └─ 재탐색 기초금액 업데이트 완료: {res_data.get('기초금액')}")
-                                    
-                                    if len(self.browser.driver.window_handles) > 1:
-                                        self.browser.driver.close()
-                                        self.browser.driver.switch_to.window(self.browser.driver.window_handles[0])
-                                else:
-                                    print(f"❌ [재탐색] 공고를 찾을 수 없음: {display_name}")
-                            except Exception as e:
-                                print(f"❗ [재탐색] '{display_name}' 처리 중 에러 발생: {e}")
-                                traceback.print_exc()
-                            time.sleep(0.3)
-                        
-                        # 재탐색 완료 후 중복 제거
-                        self._remove_duplicate_bids()
-                    else:
-                        print("✅ 기초금액이 누락된 공고가 없습니다.")
-            except Exception as e:
-                print(f"⚠️ 기초금액 누락 행 재탐색 중 오류 발생: {e}")
-                traceback.print_exc()
-            # --------------------------------------------------------
+            # 중복 제거 및 재공고 처리
+            self._remove_duplicate_bids()
             
         except Exception as e:
             print(f"🛑 프로그램 실행 중 치명적 오류 발생")
